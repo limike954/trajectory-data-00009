@@ -1,0 +1,40 @@
+package system
+
+import (
+	"github.com/limike954/trajectory-data-00009/pkg/template/multi-shard/shards/game/command"
+	"github.com/limike954/trajectory-data-00009/pkg/template/multi-shard/shards/game/event"
+
+	"github.com/limike954/trajectory-data-00009/pkg/cardinal"
+)
+
+type PlayerLeaveSystemState struct {
+	cardinal.BaseSystemState
+	PlayerLeaveCommands  cardinal.WithCommand[command.PlayerLeave]
+	PlayerDepartureEvent cardinal.WithEvent[event.PlayerDeparture]
+	Players              PlayerSearch
+}
+
+// PlayerLeaveSystem is called when a player leaves a quadrant (e.g. to join another quadrant).
+func PlayerLeaveSystem(state *PlayerLeaveSystemState) {
+	players := make(map[string]cardinal.EntityID)
+
+	for entity, player := range state.Players.Iter() {
+		players[player.Tag.Get().ArgusAuthID] = entity
+	}
+
+	for cmd := range state.PlayerLeaveCommands.Iter() {
+		command := cmd.Payload
+
+		entityID, exists := players[command.ArgusAuthID]
+		if !exists {
+			state.Logger().Info().Msgf("Player with ID %s not found", command.ArgusAuthID)
+			continue
+		}
+
+		state.Players.Destroy(entityID)
+
+		state.PlayerDepartureEvent.Emit(event.PlayerDeparture{
+			ArgusAuthID: command.ArgusAuthID,
+		})
+	}
+}

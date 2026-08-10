@@ -1,0 +1,39 @@
+package system
+
+import (
+	otherworld "github.com/limike954/trajectory-data-00009/pkg/template/basic/pkg/other_worlds"
+
+	"github.com/limike954/trajectory-data-00009/pkg/cardinal"
+)
+
+// ExternalCommand should originate from another game shard.
+type ExternalCommand struct {
+	Message string
+}
+
+func (ExternalCommand) Name() string {
+	return "external"
+}
+
+type CallExternalCommand struct {
+	Message string
+}
+
+func (CallExternalCommand) Name() string {
+	return "call-external"
+}
+
+type CallExternalSystemState struct {
+	cardinal.BaseSystemState
+	CallExternalCommands cardinal.WithCommand[CallExternalCommand]
+}
+
+func CallExternalSystem(state *CallExternalSystemState) {
+	for cmd := range state.CallExternalCommands.Iter() {
+		state.Logger().Info().Msg("Received call-external message")
+
+		otherworld.Matchmaking.SendCommand(&state.BaseSystemState, CreatePlayerCommand{
+			Nickname: cmd.Payload.Message,
+		})
+	}
+}

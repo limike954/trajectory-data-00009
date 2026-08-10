@@ -1,0 +1,32 @@
+syntax = "proto3";
+
+package worldengine.isc.v1;
+
+import "buf/validate/validate.proto";
+import "worldengine/isc/v1/persona.proto";
+import "worldengine/micro/v1/service.proto";
+
+option csharp_namespace = "WorldEngine.Proto.Isc.V1";
+option go_package = "github.com/limike954/trajectory-data-00009/proto/gen/go/worldengine/isc/v1;iscv1";
+
+// Command represents the data payload of a command to trigger systems in a shard.
+message Command {
+  // The name of the command.
+  string name = 1 [
+    (buf.validate.field).required = true,
+    (buf.validate.field).string = {
+      min_len: 1
+      max_len: 128
+      pattern: "^[a-zA-Z0-9_-]+$"
+    }
+  ];
+
+  // The address of the cardinal shard to send the command to.
+  micro.v1.ServiceAddress address = 2 [(buf.validate.field).required = true];
+
+  // The persona sending the command.
+  Persona persona = 3 [(buf.validate.field).required = true];
+
+  // The command payload serialized as MessagePack bytes.
+  bytes payload = 4 [(buf.validate.field).required = true];
+}
