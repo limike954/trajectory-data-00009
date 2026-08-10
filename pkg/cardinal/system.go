@@ -39,14 +39,7 @@ func RegisterSystem[T any](world *World, system func(*T), opts ...SystemOption) 
 		panic(eris.Wrapf(err, "error initializing system fields"))
 	}
 
-	err = ecs.RegisterSystem(world.world, ecs.RegisterSystemOptions[T]{
-		Name:            fmt.Sprintf("%T", system),
-		State:           state,
-		System:          func() { system(state) },
-		Hook:            cfg.hook,
-		DepsComponent:   deps1,
-		DepsSystemEvent: deps2,
-	})
+	err = ecs.RegisterSystemWithDeps(world.world, fmt.Sprintf("%T", system), cfg.hook, func() { system(state) }, deps1, deps2)
 	if err != nil {
 		panic(eris.Wrapf(err, "error registering system"))
 	}
@@ -496,7 +489,7 @@ func (s *search[T]) init(meta *systemInitMetadata) error {
 		}
 
 		s.components.Set(cid)       // Add to local component set (used for archetype lookups)
-		meta.depsComponent.Set(cid) // Add to system component deps (used by scheduler)
+		meta.depsComponent.Set(cid) // Add to system component deps (used for debug schedule metadata)
 	}
 	return nil
 }
