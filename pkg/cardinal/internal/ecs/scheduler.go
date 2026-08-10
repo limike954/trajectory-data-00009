@@ -1,8 +1,6 @@
 package ecs
 
 import (
-	"sync"
-	"sync/atomic"
 	"time"
 
 	"slices"
@@ -17,19 +15,12 @@ type systemMetadata struct {
 	fn   func()        // Function that wraps a System
 }
 
-// systemScheduler manages the execution of systems in a dependency-aware concurrent manner.
-// It orders systems based on their component and system event dependencies and is optimized to
-// maximize parallelism while maintaining correct order.
+// systemScheduler manages deterministic sequential execution of systems.
 type systemScheduler struct {
-	systemHook     SystemHook       // The execution hook ("pre", "update", "post")
-	systems        []systemMetadata // The systems to run
-	tier0          []int            // The first execution tier
-	graph          map[int][]int    // Mapping of systems -> systems that depend on it
-	activeIndegree uint8            // Determines which indegree is currently active (0 or 1)
-	// indegree0 and indegree1 are double-buffered counters tracking remaining dependencies
-	// for each system. They alternate between runs to avoid reinitialization.
-	indegree0 []atomic.Int32
-	indegree1 []atomic.Int32
+	systemHook SystemHook       // The execution hook ("pre", "update", "post")
+	systems    []systemMetadata // The systems to run
+	tier0      []int            // The first execution tier, retained for schedule introspection tests
+	graph      map[int][]int    // Mapping of systems -> systems that depend on it
 	// onSystemRun is an optional callback for debug performance metrics.
 	// When set, it is called after each system execution with the system name, system hook,
 	// and start/end times. Duration is derived from monotonic clock (time.Since);
@@ -39,10 +30,9 @@ type systemScheduler struct {
 // newSystemScheduler creates a new system scheduler.
 func newSystemScheduler() systemScheduler {
 	return systemScheduler{
-		systems:        make([]systemMetadata, 0),
-		tier0:          make([]int, 0),
-		graph:          make(map[int][]int),
-		activeIndegree: 0,
+		systems: make([]systemMetadata, 0),
+		tier0:   make([]int, 0),
+		graph:   make(map[int][]int),
 	}
 }
 
@@ -51,68 +41,21 @@ func (s *systemScheduler) register(name string, systemDep bitmap.Bitmap, systemF
 	s.systems = append(s.systems, systemMetadata{name: name, deps: systemDep, fn: systemFn})
 }
 
-// Run executes the systems in the order of their dependencies. It returns an error if any system
-// returns an error. If multiple systems fail, all errors are wrapped in a single error.
+// Run executes the systems in registration order.
 func (s *systemScheduler) Run() {
-	// Fast path: no systems in hook.
-	if len(s.systems) == 0 {
-		return
-	}
-
 	// Single monotonic base for this run
 	schedulerStartTime := time.Now()
 
-	executionQueue := make(chan int, len(s.systems))
-	defer close(executionQueue)
-
-	currentIndegree, nextIndegree := s.getCurrentAndNextIndegrees()
-	var wg sync.WaitGroup
-
-	// Schedule all tier 0 systems
-	for _, systemID := range s.tier0 {
-		executionQueue <- systemID
+	for _, system := range s.systems {
+		if s.onSystemRun != nil { // Set by the debug module to collect performance metrics.
+			systemStartTime := schedulerStartTime.Add(time.Since(schedulerStartTime))
+			system.fn()
+			systemEndTime := systemStartTime.Add(time.Since(systemStartTime))
+			s.onSystemRun(system.name, s.systemHook, systemStartTime, systemEndTime)
+		} else {
+			system.fn()
+		}
 	}
-
-	// Launch goroutines to execute systems
-	for range s.systems {
-		systemID := <-executionQueue
-		wg.Go(func() {
-			if s.onSystemRun != nil { // Set by the debug module to collect performance metrics.
-				systemStartTime := schedulerStartTime.Add(time.Since(schedulerStartTime))
-				s.systems[systemID].fn()
-				systemEndTime := systemStartTime.Add(time.Since(systemStartTime))
-				s.onSystemRun(s.systems[systemID].name, s.systemHook, systemStartTime, systemEndTime)
-			} else {
-				s.systems[systemID].fn()
-			}
-
-			// Process all systems that depend on this one.
-			for _, dependent := range s.graph[systemID] {
-				remainingDeps := currentIndegree[dependent].Add(-1)
-				nextIndegree[dependent].Add(1)
-
-				// If this was the last dependency, schedule it for execution.
-				if remainingDeps == 0 {
-					executionQueue <- dependent
-				}
-			}
-		})
-	}
-
-	wg.Wait() // Wait for all systems to finish
-}
-
-// getCurrentAndNextIndegrees returns the current and next indegrees. It also switches the active
-// indegree buffer with the next one.
-func (s *systemScheduler) getCurrentAndNextIndegrees() ([]atomic.Int32, []atomic.Int32) {
-	isFirstBuffer := s.activeIndegree == 0  // Capture current state before toggle
-	s.activeIndegree = 1 - s.activeIndegree // Toggle between 0 and 1
-
-	if isFirstBuffer {
-		return s.indegree0, s.indegree1
-	}
-
-	return s.indegree1, s.indegree0
 }
 
 // SystemInfo describes a system and its dependents for external introspection.
@@ -141,29 +84,17 @@ func (s *systemScheduler) scheduleInfo() ScheduleInfo {
 	return ScheduleInfo{Hook: s.systemHook, Systems: systems}
 }
 
-// createSchedule initializes the dependency graph and execution schedule for the systems.
+// createSchedule initializes schedule metadata for introspection.
 // Must be called after all systems are registered and before the first Run.
 func (s *systemScheduler) createSchedule() {
 	graph, indegree := buildDependencyGraph(s.systems)
 	s.graph = graph
-
-	// Initialize double-buffered atomic counters for tracking dependencies. These are used to avoid
-	// reallocation during system execution.
-	s.activeIndegree = 0
-	s.indegree0 = make([]atomic.Int32, len(s.systems))
-	s.indegree1 = make([]atomic.Int32, len(s.systems))
-
-	// Initialize the first buffer with the initial dependency counts.
-	for k, v := range indegree {
-		s.indegree0[k].Store(int32(v)) //nolint:gosec // Won't overflow
-	}
-
 	s.tier0 = getFirstTier(s.systems, indegree)
 }
 
 // buildDependencyGraph creates a directed acyclic graph (DAG) of system dependencies
-// based on their shared component access patterns. It returns the graph as an adjacency
-// list and a map of each system's dependency count.
+// based on their shared component access patterns. The graph is retained for debug
+// introspection; execution is always sequential in registration order.
 func buildDependencyGraph(systems []systemMetadata) (map[int][]int, map[int]int) {
 	graph := make(map[int][]int, len(systems))
 	indegree := make(map[int]int, len(systems))
@@ -193,8 +124,7 @@ func buildDependencyGraph(systems []systemMetadata) (map[int][]int, map[int]int)
 	return graph, indegree
 }
 
-// getFirstTier returns the list of systems without any dependencies. These will be the first
-// systems to be run.
+// getFirstTier returns the list of systems without any dependencies.
 func getFirstTier(systems []systemMetadata, indegree map[int]int) []int {
 	var currentTier []int
 	for systemID := range systems {

@@ -28,22 +28,12 @@ type initSystem struct {
 	fn   func() // Function that wraps a System
 }
 
-func RegisterSystem[T any](world *World, options RegisterSystemOptions[T]) error {
-	// TODO: maybe separate these so this error can never happen.
-	// Add system event deps to component deps.
-	deps := options.DepsComponent.Clone(nil)
-	n := world.state.components.nextID
-	assert.That(options.DepsSystemEvent.Count()+int(n) <= math.MaxUint32-1, "system dependencies exceed max limit")
-	options.DepsSystemEvent.Range(func(x uint32) {
-		deps.Set(n + x)
-	})
-
-	hook := options.Hook
+func RegisterSystem(world *World, name string, hook SystemHook, system func()) error {
 	switch hook {
 	case Init:
-		world.initSystems = append(world.initSystems, initSystem{name: options.Name, fn: options.System})
+		world.initSystems = append(world.initSystems, initSystem{name: name, fn: system})
 	case PreUpdate, Update, PostUpdate:
-		world.scheduler[hook].register(options.Name, deps, options.System)
+		world.scheduler[hook].register(name, bitmap.Bitmap{}, system)
 	default:
 		return eris.Errorf("invalid system hook %d", hook)
 	}
@@ -51,11 +41,29 @@ func RegisterSystem[T any](world *World, options RegisterSystemOptions[T]) error
 	return nil
 }
 
-type RegisterSystemOptions[T any] struct {
-	Name            string
-	State           *T
-	System          func()
-	Hook            SystemHook
-	DepsComponent   bitmap.Bitmap
-	DepsSystemEvent bitmap.Bitmap
+func RegisterSystemWithDeps(
+	world *World,
+	name string,
+	hook SystemHook,
+	system func(),
+	depsComponent bitmap.Bitmap,
+	depsSystemEvent bitmap.Bitmap,
+) error {
+	deps := depsComponent.Clone(nil)
+	n := world.state.components.nextID
+	assert.That(depsSystemEvent.Count()+int(n) <= math.MaxUint32-1, "system dependencies exceed max limit")
+	depsSystemEvent.Range(func(x uint32) {
+		deps.Set(n + x)
+	})
+
+	switch hook {
+	case Init:
+		world.initSystems = append(world.initSystems, initSystem{name: name, fn: system})
+	case PreUpdate, Update, PostUpdate:
+		world.scheduler[hook].register(name, deps, system)
+	default:
+		return eris.Errorf("invalid system hook %d", hook)
+	}
+
+	return nil
 }
